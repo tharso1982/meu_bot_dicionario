@@ -2,249 +2,291 @@ import discord
 from discord.ext import commands
 import json
 import os
-from dotenv import load_dotenv
+import asyncio
+import logging
 
-# Carregar variáveis de ambiente
-load_dotenv()
+# Configurar logging para debug
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Configurações do bot
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(command_prefix='!', intents=intents)
+
+bot = commands.Bot(
+    command_prefix='!',
+    intents=intents,
+    help_command=None
+)
 
 # Arquivo para armazenar o dicionário
 ARQUIVO_DICIONARIO = 'dicionario.json'
 
-# Carregar dicionário existente
 def carregar_dicionario():
+    """Carrega o dicionário do arquivo JSON"""
     try:
         with open(ARQUIVO_DICIONARIO, 'r', encoding='utf-8') as f:
             return json.load(f)
-    except FileNotFoundError:
+    except (FileNotFoundError, json.JSONDecodeError):
         return {}
 
-# Salvar dicionário
 def salvar_dicionario(dicionario):
-    with open(ARQUIVO_DICIONARIO, 'w', encoding='utf-8') as f:
-        json.dump(dicionario, f, ensure_ascii=False, indent=4)
+    """Salva o dicionário no arquivo JSON"""
+    try:
+        with open(ARQUIVO_DICIONARIO, 'w', encoding='utf-8') as f:
+            json.dump(dicionario, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        logger.error(f"Erro ao salvar dicionário: {e}")
+        return False
 
-# Dicionário em memória
+# Carregar dicionário inicial
 dicionario = carregar_dicionario()
 
-# Evento quando o bot estiver pronto
 @bot.event
 async def on_ready():
-    print(f'✅ Bot {bot.user} está online!')
-    print(f'📚 Dicionário carregado com {len(dicionario)} termos')
-    await bot.change_presence(activity=discord.Game(name="!ajuda para ver comandos"))
+    """Evento quando o bot estiver pronto"""
+    logger.info(f'✅ Bot {bot.user} conectado com sucesso!')
+    logger.info(f'📚 Dicionário carregado com {len(dicionario)} termos')
+    
+    # Atualizar status
+    await bot.change_presence(
+        activity=discord.Activity(
+            type=discord.ActivityType.watching,
+            name=f"{len(dicionario)} termos | !ajuda"
+        )
+    )
 
-# Comando de ajuda
+@bot.event
+async def on_command_error(ctx, error):
+    """Tratamento de erros"""
+    if isinstance(error, commands.CommandNotFound):
+        return
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send("❌ **Argumentos faltando!** Use `!ajuda` para ver a sintaxe correta.")
+    else:
+        logger.error(f"Erro no comando: {error}")
+
+# COMANDOS DO BOT
 @bot.command()
 async def ajuda(ctx):
+    """Mostra todos os comandos disponíveis"""
     embed = discord.Embed(
-        title="📚 Comandos do Dicionário",
-        description="Comandos disponíveis:",
+        title="📚 **COMANDOS DO DICIONÁRIO**",
+        description="Aqui estão todos os comandos disponíveis:",
         color=0x00ff00
     )
-    embed.add_field(
-        name="!definir <termo> <definição>",
-        value="Adiciona um novo termo ao dicionário",
-        inline=False
-    )
-    embed.add_field(
-        name="!buscar <termo>",
-        value="Busca a definição de um termo",
-        inline=False
-    )
-    embed.add_field(
-        name="!listar",
-        value="Lista todos os termos disponíveis",
-        inline=False
-    )
-    embed.add_field(
-        name="!remover <termo>",
-        value="Remove um termo do dicionário",
-        inline=False
-    )
-    embed.add_field(
-        name="!estatisticas",
-        value="Mostra estatísticas do dicionário",
-        inline=False
-    )
+    
+    comandos = [
+        ("`!definir <termo> <definição>`", "Adiciona um novo termo ao dicionário"),
+        ("`!buscar <termo>`", "Busca a definição de um termo"),
+        ("`!listar [página]`", "Lista todos os termos (10 por página)"),
+        ("`!remover <termo>`", "Remove um termo do dicionário"),
+        ("`!editar <termo> <nova_definição>`", "Edita a definição de um termo"),
+        ("`!estatisticas`", "Mostra estatísticas do dicionário"),
+        ("`!ajuda`", "Mostra esta mensagem de ajuda")
+    ]
+    
+    for nome, descricao in comandos:
+        embed.add_field(name=nome, value=descricao, inline=False)
+    
+    embed.set_footer(text=f"Solicitado por {ctx.author.display_name}")
     await ctx.send(embed=embed)
 
-# Comando para adicionar definição
 @bot.command()
 async def definir(ctx, termo: str, *, definicao: str):
+    """Adiciona um novo termo ao dicionário"""
     termo = termo.lower().strip()
+    
+    if len(termo) > 50:
+        await ctx.send("❌ **Termo muito longo!** Máximo 50 caracteres.")
+        return
+    
+    if len(definicao) > 1000:
+        await ctx.send("❌ **Definição muito longa!** Máximo 1000 caracteres.")
+        return
     
     if termo in dicionario:
         embed = discord.Embed(
-            title="⚠️ Termo Existente",
-            description=f"O termo '{termo}' já existe. Use !editar para modificar.",
+            title="⚠️ **Termo Já Existe**",
+            description=f"O termo `{termo}` já existe no dicionário.",
             color=0xffa500
+        )
+        embed.add_field(
+            name="Definição Atual",
+            value=dicionario[termo][:200] + "..." if len(dicionario[termo]) > 200 else dicionario[termo],
+            inline=False
+        )
+        embed.add_field(
+            name="Ação",
+            value="Use `!editar` para modificar a definição.",
+            inline=False
         )
         await ctx.send(embed=embed)
         return
     
+    # Adicionar ao dicionário
     dicionario[termo] = definicao
-    salvar_dicionario(dicionario)
+    if salvar_dicionario(dicionario):
+        embed = discord.Embed(
+            title="✅ **Termo Adicionado**",
+            description=f"**{termo}** foi adicionado ao dicionário!",
+            color=0x00ff00
+        )
+        embed.add_field(
+            name="Definição",
+            value=definicao[:500] + "..." if len(definicao) > 500 else definicao,
+            inline=False
+        )
+        embed.set_footer(text=f"Adicionado por {ctx.author.display_name}")
+    else:
+        embed = discord.Embed(
+            title="❌ **Erro ao Salvar**",
+            description="Ocorreu um erro ao salvar o termo. Tente novamente.",
+            color=0xff0000
+        )
     
-    embed = discord.Embed(
-        title="✅ Termo Adicionado",
-        description=f"**{termo}**: {definicao}",
-        color=0x00ff00
-    )
     await ctx.send(embed=embed)
 
-# Comando para buscar definição
 @bot.command()
 async def buscar(ctx, *, termo: str):
+    """Busca a definição de um termo"""
     termo = termo.lower().strip()
     
     if termo in dicionario:
+        definicao = dicionario[termo]
         embed = discord.Embed(
-            title=f"📖 {termo.capitalize()}",
-            description=dicionario[termo],
+            title=f"📖 **{termo.upper()}**",
+            description=definicao,
             color=0x0099ff
         )
-        embed.set_footer(text=f"Termo consultado por {ctx.author.display_name}")
+        embed.set_footer(text=f"Solicitado por {ctx.author.display_name}")
     else:
         embed = discord.Embed(
-            title="❌ Termo Não Encontrado",
-            description=f"O termo '{termo}' não existe no dicionário.",
+            title="❌ **Termo Não Encontrado**",
+            description=f"O termo `{termo}` não foi encontrado no dicionário.",
             color=0xff0000
         )
         embed.add_field(
-            name="Sugestão",
-            value="Use !definir para adicionar este termo",
+            name="💡 Dica",
+            value="Use `!definir` para adicionar este termo ao dicionário.",
             inline=False
         )
     
     await ctx.send(embed=embed)
 
-# Comando para listar todos os termos
 @bot.command()
-async def listar(ctx):
+async def listar(ctx, pagina: int = 1):
+    """Lista todos os termos do dicionário"""
     if not dicionario:
         embed = discord.Embed(
-            title="📚 Dicionário Vazio",
-            description="Nenhum termo foi adicionado ainda.",
+            title="📚 **Dicionário Vazio**",
+            description="Nenhum termo foi adicionado ainda.\nUse `!definir` para adicionar o primeiro!",
             color=0xff0000
         )
         await ctx.send(embed=embed)
         return
     
-    termos = ", ".join(sorted(dicionario.keys()))
+    # Paginação
+    termos = sorted(dicionario.keys())
+    itens_por_pagina = 10
+    total_paginas = (len(termos) + itens_por_pagina - 1) // itens_por_pagina
     
-    # Discord limita a 2000 caracteres por mensagem
-    if len(termos) > 1500:
-        termos = termos[:1500] + "...\n(use !buscar <termo> para ver definições específicas)"
+    if pagina < 1 or pagina > total_paginas:
+        pagina = 1
+    
+    inicio = (pagina - 1) * itens_por_pagina
+    fim = inicio + itens_por_pagina
+    termos_pagina = termos[inicio:fim]
     
     embed = discord.Embed(
-        title="📚 Todos os Termos",
-        description=termos,
-        color=0x0099ff
+        title="📚 **Todos os Termos**",
+        color=0x9370db
     )
-    embed.set_footer(text=f"Total de {len(dicionario)} termos")
+    
+    lista_termos = "\n".join([f"• **{termo}**" for termo in termos_pagina])
+    embed.description = lista_termos
+    
+    embed.set_footer(text=f"Página {pagina}/{total_paginas} • Total: {len(termos)} termos")
+    
     await ctx.send(embed=embed)
 
-# Comando para remover termo
 @bot.command()
 async def remover(ctx, *, termo: str):
+    """Remove um termo do dicionário"""
     termo = termo.lower().strip()
     
     if termo not in dicionario:
         embed = discord.Embed(
-            title="❌ Termo Não Encontrado",
-            description=f"O termo '{termo}' não existe no dicionário.",
+            title="❌ **Termo Não Encontrado**",
+            description=f"O termo `{termo}` não existe no dicionário.",
             color=0xff0000
         )
         await ctx.send(embed=embed)
         return
     
-    definicao_removida = dicionario.pop(termo)
-    salvar_dicionario(dicionario)
+    # Verificar permissões (opcional: apenas quem adicionou pode remover)
+    definicao_removida = dicionario[termo]
+    del dicionario[termo]
     
-    embed = discord.Embed(
-        title="🗑️ Termo Removido",
-        description=f"**{termo}** foi removido do dicionário.",
-        color=0x00ff00
-    )
-    embed.add_field(
-        name="Definição Removida",
-        value=definicao_removida[:500],  # Limita o tamanho
-        inline=False
-    )
+    if salvar_dicionario(dicionario):
+        embed = discord.Embed(
+            title="🗑️ **Termo Removido**",
+            description=f"**{termo}** foi removido do dicionário.",
+            color=0x00ff00
+        )
+        embed.add_field(
+            name="Definição Removida",
+            value=definicao_removida[:300] + "..." if len(definicao_removida) > 300 else definicao_removida,
+            inline=False
+        )
+        embed.set_footer(text=f"Removido por {ctx.author.display_name}")
+    else:
+        embed = discord.Embed(
+            title="❌ **Erro ao Remover**",
+            description="Ocorreu um erro ao remover o termo. Tente novamente.",
+            color=0xff0000
+        )
+    
     await ctx.send(embed=embed)
 
-# Comando para estatísticas
 @bot.command()
 async def estatisticas(ctx):
+    """Mostra estatísticas do dicionário"""
     total_termos = len(dicionario)
     
     embed = discord.Embed(
-        title="📊 Estatísticas do Dicionário",
+        title="📊 **ESTATÍSTICAS DO DICIONÁRIO**",
         color=0x9370db
     )
-    embed.add_field(name="📚 Total de Termos", value=total_termos, inline=True)
-    embed.add_field(name="👥 Servidores", value=len(bot.guilds), inline=True)
-    embed.add_field(name="⚡ Latência", value=f"{round(bot.latency * 1000)}ms", inline=True)
+    
+    embed.add_field(name="📚 **Total de Termos**", value=total_termos, inline=True)
+    embed.add_field(name="🖥️ **Servidores**", value=len(bot.guilds), inline=True)
+    embed.add_field(name="⚡ **Latência**", value=f"{round(bot.latency * 1000)}ms", inline=True)
     
     if total_termos > 0:
-        ultimos_termos = list(dicionario.keys())[-5:]  # Últimos 5 termos
+        # Últimos 3 termos adicionados
+        ultimos_termos = list(dicionario.keys())[-3:]
         embed.add_field(
-            name="📝 Últimos Termos Adicionados",
+            name="🆕 **Últimos Termos**",
             value=", ".join(ultimos_termos),
             inline=False
         )
     
+    embed.set_footer(text=f"Solicitado por {ctx.author.display_name}")
     await ctx.send(embed=embed)
 
-# Comando para editar definição existente
-@bot.command()
-async def editar(ctx, termo: str, *, nova_definicao: str):
-    termo = termo.lower().strip()
-    
-    if termo not in dicionario:
-        embed = discord.Embed(
-            title="❌ Termo Não Encontrado",
-            description=f"O termo '{termo}' não existe. Use !definir para criá-lo.",
-            color=0xff0000
-        )
-        await ctx.send(embed=embed)
-        return
-    
-    definicao_antiga = dicionario[termo]
-    dicionario[termo] = nova_definicao
-    salvar_dicionario(dicionario)
-    
-    embed = discord.Embed(
-        title="✏️ Termo Editado",
-        description=f"**{termo}** foi atualizado.",
-        color=0x00ff00
-    )
-    embed.add_field(name="Definição Anterior", value=definicao_antiga[:500], inline=False)
-    embed.add_field(name="Nova Definição", value=nova_definicao[:500], inline=False)
-    await ctx.send(embed=embed)
-
-# Tratamento de erros
-@bot.event
-async def on_command_error(ctx, error):
-    if isinstance(error, commands.MissingRequiredArgument):
-        embed = discord.Embed(
-            title="❌ Argumento Faltando",
-            description=f"Use: `{ctx.command.name} {ctx.command.signature}`",
-            color=0xff0000
-        )
-        await ctx.send(embed=embed)
-    else:
-        print(f"Erro: {error}")
-
-# Iniciar o bot
+# INICIALIZAÇÃO DO BOT
 if __name__ == "__main__":
-    token = os.getenv('DISCORD_TOKEN')
-    if token:
+    token = os.environ.get('DISCORD_TOKEN')
+    
+    if not token:
+        logger.error("❌ Token do Discord não encontrado!")
+        logger.info("💡 Verifique se a variável DISCORD_TOKEN está configurada no Railway")
+        exit(1)
+    
+    logger.info("🚀 Iniciando bot Discord...")
+    try:
         bot.run(token)
-    else:
-        print("❌ ERRO: Token não encontrado. Verifique o arquivo .env")
+    except Exception as e:
+        logger.error(f"❌ Erro ao iniciar bot: {e}")
