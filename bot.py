@@ -19,7 +19,7 @@ intents.message_content = True
 bot = commands.Bot(
     command_prefix='!',
     intents=intents,
-    help_command=None
+    help_command=None  # Isso evita duplicação do comando de ajuda padrão
 )
 
 # Dicionário em memória
@@ -38,6 +38,18 @@ async def on_ready():
             name=f"{len(dicionario)} termos | !ajuda"
         )
     )
+
+@bot.event
+async def on_command_error(ctx, error):
+    """Tratamento centralizado de erros - EVITA DUPLICAÇÃO"""
+    if isinstance(error, commands.CommandNotFound):
+        return  # Ignora comandos não encontrados silenciosamente
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send(f"❌ **Argumentos faltando!** Use: `{ctx.command.name} {ctx.command.signature}`")
+    else:
+        logger.error(f"Erro no comando {ctx.command}: {error}")
+
+# ========== COMANDOS PRINCIPAIS ==========
 
 @bot.command()
 async def ping(ctx):
@@ -265,7 +277,7 @@ async def carregar_espinosa(ctx):
         "abjeção": "Tristeza que surge do homem considerar sua própria impotência.",
         "humildade": "Tristeza que surge do homem considerar sua própria impotência ou fraqueza.",
         "devotamento": "Desejo de fazer o bem que nasce do fato de vivermos sob o império da razão.",
-        "virtude": "A potência mesma do homem, ou seja, sua essência enquanto tem o poder de fazer coisas que podem ser compreendidas somente pelas leis de sua natureza.",
+        "virtude": "A potência mesma do homme, ou seja, sua essência enquanto tem o poder de fazer coisas que podem ser compreendidas somente pelas leis de sua natureza.",
         "potência": "A essência mesma do homem enquanto tem o poder de produzir certos efeitos que podem ser compreendidos pelas leis de sua natureza.",
         "bondade": "Propriedade pela qual uma coisa se conforma ao nosso conatus e nos é útil.",
         "perfeição": "Realidade ou essência de uma coisa, independentemente de sua duração.",
@@ -357,7 +369,7 @@ async def carregar_espinosa(ctx):
 
 @bot.command()
 async def ajuda(ctx):
-    """Mostra todos os comandos disponíveis"""
+    """Mostra todos os comandos disponíveis - ÚNICA MENSAGEM"""
     embed = discord.Embed(
         title="📚 **COMANDOS DO DICIONÁRIO**",
         description="Aqui estão todos os comandos disponíveis:",
@@ -425,7 +437,7 @@ async def estatisticas(ctx):
     
     await ctx.send(embed=embed)
 
-# INICIALIZAÇÃO
+# ========== INICIALIZAÇÃO ==========
 if __name__ == "__main__":
     token = os.environ.get('DISCORD_TOKEN')
     
