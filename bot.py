@@ -76,6 +76,7 @@ async def definir(ctx, termo: str, *, definicao: str):
     dicionario[termo] = {
         'definicao': definicao,
         'autor': ctx.author.display_name,
+        'autor_id': str(ctx.author.id),
         'data': datetime.now().strftime('%d/%m/%Y %H:%M')
     }
     
@@ -114,8 +115,8 @@ async def buscar(ctx, *, termo: str):
     await ctx.send(embed=embed)
 
 @bot.command()
-async def listar(ctx):
-    """Lista todos os termos"""
+async def listar(ctx, pagina: int = 1):
+    """Lista todos os termos com paginação"""
     if not dicionario:
         embed = discord.Embed(
             title="📚 **Dicionário Vazio**",
@@ -127,44 +128,85 @@ async def listar(ctx):
     
     termos = list(dicionario.keys())
     
+    # Paginação
+    itens_por_pagina = 15
+    total_paginas = (len(termos) + itens_por_pagina - 1) // itens_por_pagina
+    
+    if pagina < 1:
+        pagina = 1
+    elif pagina > total_paginas:
+        pagina = total_paginas
+    
+    inicio = (pagina - 1) * itens_por_pagina
+    fim = inicio + itens_por_pagina
+    termos_pagina = termos[inicio:fim]
+    
     embed = discord.Embed(
         title="📚 **Todos os Termos**",
         color=0x9370db
     )
     
-    # Mostrar até 20 termos
-    lista_termos = "\n".join([f"• **{termo}**" for termo in termos[:20]])
+    lista_termos = "\n".join([f"• **{termo}**" for termo in termos_pagina])
     embed.description = lista_termos
     
-    if len(termos) > 20:
-        embed.set_footer(text=f"Mostrando 20 de {len(termos)} termos • Use !buscar <termo> para ver definições")
-    else:
-        embed.set_footer(text=f"Total: {len(termos)} termos")
+    embed.set_footer(text=f"Página {pagina}/{total_paginas} • Total: {len(termos)} termos • Use !buscar <termo>")
     
     await ctx.send(embed=embed)
 
 @bot.command()
-async def ajuda(ctx):
-    """Mostra todos os comandos disponíveis"""
+async def remover(ctx, *, termo: str):
+    """Remove um termo do dicionário"""
+    termo = termo.lower().strip()
+    
+    if termo not in dicionario:
+        embed = discord.Embed(
+            title="❌ **Termo Não Encontrado**",
+            description=f"O termo `{termo}` não existe no dicionário.",
+            color=0xff0000
+        )
+        await ctx.send(embed=embed)
+        return
+    
+    # Verificar permissões
+    autor_original = dicionario[termo]['autor_id']
+    autor_nome = dicionario[termo]['autor']
+    e_autor = (str(ctx.author.id) == autor_original)
+    e_admin = ctx.author.guild_permissions.administrator
+    
+    if not (e_autor or e_admin):
+        embed = discord.Embed(
+            title="❌ **Permissão Negada**",
+            description=f"Apenas **{autor_nome}** ou um **Administrador** podem remover este termo.",
+            color=0xff0000
+        )
+        await ctx.send(embed=embed)
+        return
+    
+    # Remover termo
+    definicao_removida = dicionario[termo]['definicao']
+    autor_removido = dicionario[termo]['autor']
+    del dicionario[termo]
+    
     embed = discord.Embed(
-        title="📚 **COMANDOS DO DICIONÁRIO**",
-        description="Aqui estão todos os comandos disponíveis:",
+        title="🗑️ **Termo Removido**",
+        description=f"**{termo}** foi removido do dicionário.",
         color=0x00ff00
     )
+    embed.add_field(
+        name="📝 Definição Removida", 
+        value=definicao_removida[:200] + "..." if len(definicao_removida) > 200 else definicao_removida, 
+        inline=False
+    )
+    embed.add_field(name="👤 Autor Original", value=autor_removido, inline=True)
+    embed.add_field(name="🔧 Removido por", value=ctx.author.display_name, inline=True)
     
-    comandos = [
-        ("`!ping`", "Testa a conexão do bot e mostra estatísticas"),
-        ("`!definir <termo> <definição>`", "Adiciona ou atualiza um termo"),
-        ("`!buscar <termo>`", "Busca a definição de um termo"),
-        ("`!listar`", "Lista todos os termos disponíveis"),
-        ("`!carregar_espinosa`", "Carrega termos da Ética de Espinosa"),
-        ("`!ajuda`", "Mostra esta mensagem de ajuda")
-    ]
-    
-    for nome, descricao in comandos:
-        embed.add_field(name=nome, value=descricao, inline=False)
-    
-    embed.set_footer(text=f"Bot: {bot.user.name} | Online ✅")
+    # Atualizar presença
+    await bot.change_presence(
+        activity=discord.Activity(
+            type=discord.ActivityType.watching,
+            name=f"{len(dicionario)} termos | !ajuda"
+        )
+    )
     
     await ctx.send(embed=embed)
 
@@ -266,6 +308,7 @@ async def carregar_espinosa(ctx):
             dicionario[termo_lower] = {
                 'definicao': definicao,
                 'autor': "Baruch Espinosa - Ética",
+                'autor_id': "espinosa_system",
                 'data': datetime.now().strftime('%d/%m/%Y %H:%M')
             }
             carregados += 1
@@ -311,7 +354,77 @@ async def carregar_espinosa(ctx):
     embed.set_footer(text="Use !listar para ver todos os termos disponíveis")
     
     await ctx.send(embed=embed)
+
+@bot.command()
+async def ajuda(ctx):
+    """Mostra todos os comandos disponíveis"""
+    embed = discord.Embed(
+        title="📚 **COMANDOS DO DICIONÁRIO**",
+        description="Aqui estão todos os comandos disponíveis:",
+        color=0x00ff00
+    )
     
+    comandos = [
+        ("`!ping`", "Testa a conexão do bot e mostra estatísticas"),
+        ("`!definir <termo> <definição>`", "Adiciona ou atualiza um termo"),
+        ("`!buscar <termo>`", "Busca a definição de um termo"),
+        ("`!listar [página]`", "Lista todos os termos (15 por página)"),
+        ("`!remover <termo>`", "Remove um termo (autor ou admin)"),
+        ("`!carregar_espinosa`", "Carrega TODOS os termos da Ética de Espinosa"),
+        ("`!ajuda`", "Mostra esta mensagem de ajuda")
+    ]
+    
+    for nome, descricao in comandos:
+        embed.add_field(name=nome, value=descricao, inline=False)
+    
+    embed.set_footer(text=f"Bot: {bot.user.name} | Online ✅ | Total: {len(dicionario)} termos")
+    
+    await ctx.send(embed=embed)
+
+@bot.command()
+async def estatisticas(ctx):
+    """Mostra estatísticas detalhadas do dicionário"""
+    total_termos = len(dicionario)
+    
+    # Contar termos por autor
+    autores = {}
+    for termo, dados in dicionario.items():
+        autor = dados['autor']
+        if autor in autores:
+            autores[autor] += 1
+        else:
+            autores[autor] = 1
+    
+    # Ordenar autores por número de termos
+    autores_ordenados = sorted(autores.items(), key=lambda x: x[1], reverse=True)
+    
+    embed = discord.Embed(
+        title="📊 **ESTATÍSTICAS DO DICIONÁRIO**",
+        color=0x9370db
+    )
+    
+    embed.add_field(name="📚 Total de Termos", value=total_termos, inline=True)
+    embed.add_field(name="🖥️ Servidores", value=len(bot.guilds), inline=True)
+    embed.add_field(name="⚡ Latência", value=f"{round(bot.latency * 1000)}ms", inline=True)
+    
+    if autores_ordenados:
+        top_autores = "\n".join([f"• **{autor}**: {qtd} termos" for autor, qtd in autores_ordenados[:5]])
+        embed.add_field(
+            name="👥 Principais Autores",
+            value=top_autores,
+            inline=False
+        )
+    
+    if total_termos > 0:
+        ultimos_termos = list(dicionario.keys())[-3:]
+        embed.add_field(
+            name="🆕 Últimos Termos Adicionados",
+            value=", ".join(ultimos_termos),
+            inline=False
+        )
+    
+    await ctx.send(embed=embed)
+
 # INICIALIZAÇÃO
 if __name__ == "__main__":
     token = os.environ.get('DISCORD_TOKEN')
