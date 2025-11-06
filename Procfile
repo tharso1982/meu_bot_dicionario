@@ -1,1 +1,1 @@
-worker: python bot.py
+worker: python meu_bot_dicionario.py
