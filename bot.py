@@ -1,11 +1,11 @@
 import discord
 from discord.ext import commands
-import json
 import os
-import asyncio
+import asyncpg
 import logging
+import traceback
 
-# Configurar logging para debug
+# Configurar logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -19,274 +19,244 @@ bot = commands.Bot(
     help_command=None
 )
 
-# Arquivo para armazenar o dicionário
-ARQUIVO_DICIONARIO = 'dicionario.json'
+# Conexão com database
+db_pool = None
 
-def carregar_dicionario():
-    """Carrega o dicionário do arquivo JSON"""
-    try:
-        with open(ARQUIVO_DICIONARIO, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+async def get_db_pool():
+    """Obtém ou cria a conexão com o database"""
+    global db_pool
+    if db_pool is None:
+        try:
+            database_url = os.environ.get('DATABASE_URL')
+            if not database_url:
+                logger.error("❌ DATABASE_URL não encontrada")
+                return None
+            
+            db_pool = await asyncpg.create_pool(
+                database_url,
+                min_size=1,
+                max_size=10,
+                command_timeout=60
+            )
+            logger.info("✅ Conexão com database estabelecida")
+        except Exception as e:
+            logger.error(f"❌ Erro ao conectar com database: {e}")
+            return None
+    return db_pool
 
-def salvar_dicionario(dicionario):
-    """Salva o dicionário no arquivo JSON"""
+async def init_db():
+    """Inicializa o banco de dados"""
+    pool = await get_db_pool()
+    if not pool:
+        return False
+    
     try:
-        with open(ARQUIVO_DICIONARIO, 'w', encoding='utf-8') as f:
-            json.dump(dicionario, f, ensure_ascii=False, indent=2)
+        async with pool.acquire() as conn:
+            # Criar tabela se não existir
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS dicionario (
+                    id SERIAL PRIMARY KEY,
+                    termo TEXT UNIQUE NOT NULL,
+                    definicao TEXT NOT NULL,
+                    autor TEXT NOT NULL,
+                    data_criacao TIMESTAMP DEFAULT NOW()
+                )
+            ''')
+            logger.info("✅ Tabela dicionario verificada/criada")
         return True
     except Exception as e:
-        logger.error(f"Erro ao salvar dicionário: {e}")
+        logger.error(f"❌ Erro ao inicializar database: {e}")
         return False
 
-# Carregar dicionário inicial
-dicionario = carregar_dicionario()
-
+# Comandos básicos para teste
 @bot.event
 async def on_ready():
-    """Evento quando o bot estiver pronto"""
-    logger.info(f'✅ Bot {bot.user} conectado com sucesso!')
-    logger.info(f'📚 Dicionário carregado com {len(dicionario)} termos')
+    logger.info(f'✅ Bot {bot.user} está online!')
     
-    # Atualizar status
-    await bot.change_presence(
-        activity=discord.Activity(
-            type=discord.ActivityType.watching,
-            name=f"{len(dicionario)} termos | !ajuda"
-        )
-    )
-
-@bot.event
-async def on_command_error(ctx, error):
-    """Tratamento de erros"""
-    if isinstance(error, commands.CommandNotFound):
-        return
-    elif isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send("❌ **Argumentos faltando!** Use `!ajuda` para ver a sintaxe correta.")
+    # Inicializar database
+    success = await init_db()
+    if success:
+        logger.info("📚 Database pronto para uso")
+        await bot.change_presence(activity=discord.Game(name="Database ✅ | !ajuda"))
     else:
-        logger.error(f"Erro no comando: {error}")
+        logger.error("❌ Database com problemas")
+        await bot.change_presence(activity=discord.Game(name="Database ❌ | !ajuda"))
 
-# COMANDOS DO BOT
 @bot.command()
-async def ajuda(ctx):
-    """Mostra todos os comandos disponíveis"""
-    embed = discord.Embed(
-        title="📚 **COMANDOS DO DICIONÁRIO**",
-        description="Aqui estão todos os comandos disponíveis:",
-        color=0x00ff00
-    )
+async def ping(ctx):
+    """Testa a conexão com o bot"""
+    latency = round(bot.latency * 1000)
     
-    comandos = [
-        ("`!definir <termo> <definição>`", "Adiciona um novo termo ao dicionário"),
-        ("`!buscar <termo>`", "Busca a definição de um termo"),
-        ("`!listar [página]`", "Lista todos os termos (10 por página)"),
-        ("`!remover <termo>`", "Remove um termo do dicionário"),
-        ("`!editar <termo> <nova_definição>`", "Edita a definição de um termo"),
-        ("`!estatisticas`", "Mostra estatísticas do dicionário"),
-        ("`!ajuda`", "Mostra esta mensagem de ajuda")
-    ]
+    # Testar database também
+    pool = await get_db_pool()
+    db_status = "✅ Conectado" if pool else "❌ Desconectado"
     
-    for nome, descricao in comandos:
-        embed.add_field(name=nome, value=descricao, inline=False)
+    embed = discord.Embed(title="🏓 **Status do Sistema**", color=0x00ff00)
+    embed.add_field(name="⚡ Latência Discord", value=f"{latency}ms", inline=True)
+    embed.add_field(name="📊 Database", value=db_status, inline=True)
+    embed.add_field(name="🖥️ Host", value="Railway", inline=True)
     
-    embed.set_footer(text=f"Solicitado por {ctx.author.display_name}")
     await ctx.send(embed=embed)
+
+@bot.command()
+async def debug_db(ctx):
+    """Comando de debug para o database"""
+    try:
+        pool = await get_db_pool()
+        if not pool:
+            await ctx.send("❌ **Database não conectado**")
+            return
+        
+        async with pool.acquire() as conn:
+            # Contar termos
+            count = await conn.fetchval('SELECT COUNT(*) FROM dicionario')
+            # Verificar tabela
+            table_exists = await conn.fetchval('''
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = 'dicionario'
+                )
+            ''')
+        
+        embed = discord.Embed(title="🔧 **Debug Database**", color=0x0099ff)
+        embed.add_field(name="📊 Tabela existe", value="✅ Sim" if table_exists else "❌ Não", inline=True)
+        embed.add_field(name="📚 Total de termos", value=count, inline=True)
+        embed.add_field(name="🌐 Host", value="Railway PostgreSQL", inline=True)
+        
+        await ctx.send(embed=embed)
+        
+    except Exception as e:
+        await ctx.send(f"❌ **Erro no debug:** {str(e)}")
 
 @bot.command()
 async def definir(ctx, termo: str, *, definicao: str):
-    """Adiciona um novo termo ao dicionário"""
-    termo = termo.lower().strip()
-    
-    if len(termo) > 50:
-        await ctx.send("❌ **Termo muito longo!** Máximo 50 caracteres.")
-        return
-    
-    if len(definicao) > 1000:
-        await ctx.send("❌ **Definição muito longa!** Máximo 1000 caracteres.")
-        return
-    
-    if termo in dicionario:
+    """Adiciona um termo ao dicionário"""
+    try:
+        pool = await get_db_pool()
+        if not pool:
+            await ctx.send("❌ **Database não disponível.** Tente novamente em alguns segundos.")
+            return
+        
+        termo = termo.lower().strip()
+        
+        async with pool.acquire() as conn:
+            # Verificar se termo já existe
+            existing = await conn.fetchrow(
+                'SELECT definicao FROM dicionario WHERE termo = $1', 
+                termo
+            )
+            
+            if existing:
+                # Atualizar
+                await conn.execute(
+                    'UPDATE dicionario SET definicao = $1, autor = $2 WHERE termo = $3',
+                    definicao, str(ctx.author), termo
+                )
+                action = "atualizado"
+            else:
+                # Inserir novo
+                await conn.execute(
+                    'INSERT INTO dicionario (termo, definicao, autor) VALUES ($1, $2, $3)',
+                    termo, definicao, str(ctx.author)
+                )
+                action = "adicionado"
+        
         embed = discord.Embed(
-            title="⚠️ **Termo Já Existe**",
-            description=f"O termo `{termo}` já existe no dicionário.",
-            color=0xffa500
-        )
-        embed.add_field(
-            name="Definição Atual",
-            value=dicionario[termo][:200] + "..." if len(dicionario[termo]) > 200 else dicionario[termo],
-            inline=False
-        )
-        embed.add_field(
-            name="Ação",
-            value="Use `!editar` para modificar a definição.",
-            inline=False
-        )
-        await ctx.send(embed=embed)
-        return
-    
-    # Adicionar ao dicionário
-    dicionario[termo] = definicao
-    if salvar_dicionario(dicionario):
-        embed = discord.Embed(
-            title="✅ **Termo Adicionado**",
-            description=f"**{termo}** foi adicionado ao dicionário!",
+            title=f"✅ **Termo {action.capitalize()}**",
+            description=f"**{termo}** foi {action} com sucesso!",
             color=0x00ff00
         )
-        embed.add_field(
-            name="Definição",
-            value=definicao[:500] + "..." if len(definicao) > 500 else definicao,
-            inline=False
-        )
-        embed.set_footer(text=f"Adicionado por {ctx.author.display_name}")
-    else:
-        embed = discord.Embed(
-            title="❌ **Erro ao Salvar**",
-            description="Ocorreu um erro ao salvar o termo. Tente novamente.",
-            color=0xff0000
-        )
-    
-    await ctx.send(embed=embed)
+        embed.add_field(name="📝 Definição", value=definicao[:500], inline=False)
+        embed.set_footer(text=f"Por {ctx.author.display_name}")
+        
+        await ctx.send(embed=embed)
+        
+    except Exception as e:
+        logger.error(f"Erro em !definir: {e}")
+        await ctx.send("❌ **Erro ao salvar termo.** Tente novamente.")
 
 @bot.command()
 async def buscar(ctx, *, termo: str):
-    """Busca a definição de um termo"""
-    termo = termo.lower().strip()
-    
-    if termo in dicionario:
-        definicao = dicionario[termo]
-        embed = discord.Embed(
-            title=f"📖 **{termo.upper()}**",
-            description=definicao,
-            color=0x0099ff
-        )
-        embed.set_footer(text=f"Solicitado por {ctx.author.display_name}")
-    else:
-        embed = discord.Embed(
-            title="❌ **Termo Não Encontrado**",
-            description=f"O termo `{termo}` não foi encontrado no dicionário.",
-            color=0xff0000
-        )
-        embed.add_field(
-            name="💡 Dica",
-            value="Use `!definir` para adicionar este termo ao dicionário.",
-            inline=False
-        )
-    
-    await ctx.send(embed=embed)
+    """Busca um termo no dicionário"""
+    try:
+        pool = await get_db_pool()
+        if not pool:
+            await ctx.send("❌ **Database não disponível.** Tente novamente em alguns segundos.")
+            return
+        
+        termo = termo.lower().strip()
+        
+        async with pool.acquire() as conn:
+            resultado = await conn.fetchrow(
+                'SELECT termo, definicao, autor, data_criacao FROM dicionario WHERE termo = $1',
+                termo
+            )
+        
+        if resultado:
+            embed = discord.Embed(
+                title=f"📖 **{resultado['termo'].capitalize()}**",
+                description=resultado['definicao'],
+                color=0x0099ff
+            )
+            embed.add_field(name="👤 Autor", value=resultado['autor'], inline=True)
+            if resultado['data_criacao']:
+                data = resultado['data_criacao'].strftime('%d/%m/%Y')
+                embed.add_field(name="📅 Data", value=data, inline=True)
+            
+            await ctx.send(embed=embed)
+        else:
+            await ctx.send(f"❌ **Termo não encontrado:** `{termo}`")
+            
+    except Exception as e:
+        logger.error(f"Erro em !buscar: {e}")
+        await ctx.send("❌ **Erro ao buscar termo.** Tente novamente.")
 
 @bot.command()
-async def listar(ctx, pagina: int = 1):
-    """Lista todos os termos do dicionário"""
-    if not dicionario:
-        embed = discord.Embed(
-            title="📚 **Dicionário Vazio**",
-            description="Nenhum termo foi adicionado ainda.\nUse `!definir` para adicionar o primeiro!",
-            color=0xff0000
-        )
-        await ctx.send(embed=embed)
+async def carregar_espinosa(ctx):
+    """Carrega os termos da Ética de Espinosa (apenas para administradores)"""
+    if not ctx.author.guild_permissions.administrator:
+        await ctx.send("❌ **Apenas administradores podem usar este comando.**")
         return
     
-    # Paginação
-    termos = sorted(dicionario.keys())
-    itens_por_pagina = 10
-    total_paginas = (len(termos) + itens_por_pagina - 1) // itens_por_pagina
+    # Dicionário de Espinosa (exemplo reduzido)
+    termos_espinosa = {
+        "Deus": "Substância absolutamente infinita, constituída por uma infinidade de atributos...",
+        "Substância": "Aquilo que existe em si mesmo e é concebido por si mesmo...",
+        "Atributo": "Aquilo que o intelecto percebe da substância como constituindo sua essência...",
+        "Conatus": "O esforço pelo qual cada coisa se esforça para perseverar em seu ser...",
+        "Liberdade": "Existir pela única necessidade de sua natureza e ser determinada a agir por si mesma..."
+    }
     
-    if pagina < 1 or pagina > total_paginas:
-        pagina = 1
-    
-    inicio = (pagina - 1) * itens_por_pagina
-    fim = inicio + itens_por_pagina
-    termos_pagina = termos[inicio:fim]
-    
-    embed = discord.Embed(
-        title="📚 **Todos os Termos**",
-        color=0x9370db
-    )
-    
-    lista_termos = "\n".join([f"• **{termo}**" for termo in termos_pagina])
-    embed.description = lista_termos
-    
-    embed.set_footer(text=f"Página {pagina}/{total_paginas} • Total: {len(termos)} termos")
-    
-    await ctx.send(embed=embed)
+    try:
+        pool = await get_db_pool()
+        if not pool:
+            await ctx.send("❌ **Database não disponível.**")
+            return
+        
+        carregados = 0
+        async with pool.acquire() as conn:
+            for termo, definicao in termos_espinosa.items():
+                try:
+                    await conn.execute(
+                        'INSERT INTO dicionario (termo, definicao, autor) VALUES ($1, $2, $3) '
+                        'ON CONFLICT (termo) DO UPDATE SET definicao = $2',
+                        termo.lower(), definicao, "Espinosa - Ética"
+                    )
+                    carregados += 1
+                except Exception as e:
+                    logger.error(f"Erro ao inserir {termo}: {e}")
+        
+        await ctx.send(f"✅ **{carregados} termos de Espinosa carregados com sucesso!**")
+        
+    except Exception as e:
+        logger.error(f"Erro em !carregar_espinosa: {e}")
+        await ctx.send("❌ **Erro ao carregar termos.**")
 
-@bot.command()
-async def remover(ctx, *, termo: str):
-    """Remove um termo do dicionário"""
-    termo = termo.lower().strip()
-    
-    if termo not in dicionario:
-        embed = discord.Embed(
-            title="❌ **Termo Não Encontrado**",
-            description=f"O termo `{termo}` não existe no dicionário.",
-            color=0xff0000
-        )
-        await ctx.send(embed=embed)
-        return
-    
-    # Verificar permissões (opcional: apenas quem adicionou pode remover)
-    definicao_removida = dicionario[termo]
-    del dicionario[termo]
-    
-    if salvar_dicionario(dicionario):
-        embed = discord.Embed(
-            title="🗑️ **Termo Removido**",
-            description=f"**{termo}** foi removido do dicionário.",
-            color=0x00ff00
-        )
-        embed.add_field(
-            name="Definição Removida",
-            value=definicao_removida[:300] + "..." if len(definicao_removida) > 300 else definicao_removida,
-            inline=False
-        )
-        embed.set_footer(text=f"Removido por {ctx.author.display_name}")
-    else:
-        embed = discord.Embed(
-            title="❌ **Erro ao Remover**",
-            description="Ocorreu um erro ao remover o termo. Tente novamente.",
-            color=0xff0000
-        )
-    
-    await ctx.send(embed=embed)
-
-@bot.command()
-async def estatisticas(ctx):
-    """Mostra estatísticas do dicionário"""
-    total_termos = len(dicionario)
-    
-    embed = discord.Embed(
-        title="📊 **ESTATÍSTICAS DO DICIONÁRIO**",
-        color=0x9370db
-    )
-    
-    embed.add_field(name="📚 **Total de Termos**", value=total_termos, inline=True)
-    embed.add_field(name="🖥️ **Servidores**", value=len(bot.guilds), inline=True)
-    embed.add_field(name="⚡ **Latência**", value=f"{round(bot.latency * 1000)}ms", inline=True)
-    
-    if total_termos > 0:
-        # Últimos 3 termos adicionados
-        ultimos_termos = list(dicionario.keys())[-3:]
-        embed.add_field(
-            name="🆕 **Últimos Termos**",
-            value=", ".join(ultimos_termos),
-            inline=False
-        )
-    
-    embed.set_footer(text=f"Solicitado por {ctx.author.display_name}")
-    await ctx.send(embed=embed)
-
-# INICIALIZAÇÃO DO BOT
+# Inicialização
 if __name__ == "__main__":
     token = os.environ.get('DISCORD_TOKEN')
-    
-    if not token:
-        logger.error("❌ Token do Discord não encontrado!")
-        logger.info("💡 Verifique se a variável DISCORD_TOKEN está configurada no Railway")
-        exit(1)
-    
-    logger.info("🚀 Iniciando bot Discord...")
-    try:
+    if token:
+        logger.info("🚀 Iniciando bot no Railway...")
         bot.run(token)
-    except Exception as e:
-        logger.error(f"❌ Erro ao iniciar bot: {e}")
+    else:
+        logger.error("❌ Token não encontrado. Verifique a variável DISCORD_TOKEN.")
